@@ -1,6 +1,5 @@
 censured
 ========
-
 A simple tool to try and figure out if some countries are blocking
 your website.
 
@@ -26,3 +25,5 @@ FAQ
     http://getfoxyproxy.org/proxylists.html
     http://www.xroxy.com/proxylist.htm
     http://proxylist.hidemyass.com/
+=======
+peeks at your website from all around the world
