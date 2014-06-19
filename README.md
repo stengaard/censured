@@ -25,5 +25,4 @@ FAQ
     http://getfoxyproxy.org/proxylists.html
     http://www.xroxy.com/proxylist.htm
     http://proxylist.hidemyass.com/
-=======
-peeks at your website from all around the world
+    http://proxybank.net/proxy_list.txt

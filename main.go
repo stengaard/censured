@@ -8,11 +8,15 @@ import (
 	"io"
 	"io/ioutil"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path"
 	"sync"
+	"time"
+
+	"code.google.com/p/go.net/proxy"
 )
 
 func usage() {
@@ -29,35 +33,68 @@ func main() {
 
 	var (
 		concurrent = flag.Int("c", 10, "number of concurrent workers")
+		timeout    = flag.Duration("t", 5*time.Second, "timeout")
+		verbose    = flag.Bool("v", false, "verbose output on stderr - log errors from proxies")
 	)
+
 	flag.Usage = usage
 	flag.Parse()
 	args := flag.Args()
+
 	urlToCheck := args[0]
 	expect := []byte(args[1])
+
+	var rawlist io.Reader
+
+	// TODO: could deliver rawlist from an HTTP source?
 	f, err := os.Open(args[2])
 	if err != nil {
 		log.Fatalf("%s", err)
 	}
+	defer f.Close()
 
-	sem, out := make(chan int, *concurrent), make(chan *result)
-	wg := &sync.WaitGroup{}
+	rawlist = f
+
+	// rate limiting semaphor
+	sem := make(chan int, *concurrent)
+
+	// result channel
+	out := make(chan *result)
 
 	go func() {
-		for proxy := range proxyGen(f) {
+		wg := &sync.WaitGroup{}
+		for proxyUri := range proxyGen(rawlist) {
 			wg.Add(1)
-			sem <- 1 // sem is here for ratelimiting
-			go func(proxy *url.URL) {
-				c := &http.Client{
-					Transport: &http.Transport{
-						Proxy: http.ProxyURL(proxy),
-					},
+			sem <- 1
+			go func(proxyUri *url.URL) {
+				proxyFn := http.ProxyURL(proxyUri)
+				var dialer interface {
+					Dial(string, string) (net.Conn, error)
+				}
+				dialer = dialerFunc(getTimeOutDialer(*timeout))
+
+				if proxyUri.Scheme == "socks" {
+					proxyFn = nil
+					dialer, err = proxy.SOCKS5("tcp", proxyUri.Host, nil, dialer)
+					if err != nil {
+						log.Fatal(err)
+					}
+
 				}
 
+				c := &http.Client{
+					Transport: &http.Transport{
+						Proxy: proxyFn,
+						//
+						Dial: dialer.Dial,
+					},
+					Timeout: *timeout,
+				}
 				out <- doCheck(urlToCheck, expect, c)
+
 				<-sem
 				wg.Done()
-			}(proxy)
+			}(proxyUri)
 		}
 
 		// wait for last checker to be done, then close
@@ -82,16 +119,36 @@ func main() {
 			s.oks++
 		}
 		r[result.country] = s
-		if result.err != nil {
+		if result.status != statOk && *verbose {
+
 			logger.Printf("Error: %s - %s", result.country, result.err)
 		}
+
 	}
 
-	fmt.Printf("%-16s : %5s %5s %5s\n", "country", "ok", "block", "err")
+	fmt.Printf("%5s %5s %5s  :  %16s\n", "ok", "block", "err", "country")
 	for country, stat := range r {
-		fmt.Printf("%-16s : %5d %5d %5d\n", country, stat.oks, stat.blocks, stat.errs)
+		fmt.Printf("%5d %5d %5d  :  %16s\n", stat.oks, stat.blocks, stat.errs, country)
 	}
 
+}
+
+type dialerFunc func(string, string) (net.Conn, error)
+
+func (f dialerFunc) Dial(n, a string) (net.Conn, error) {
+	return f(n, a)
+}
+
+func getTimeOutDialer(timeout time.Duration) func(string, string) (net.Conn, error) {
+	return func(netw, addr string) (net.Conn, error) {
+		deadline := time.Now().Add(timeout)
+		c, err := net.DialTimeout(netw, addr, timeout)
+		if err != nil {
+			return nil, err
+		}
+		c.SetDeadline(deadline)
+		return c, nil
+	}
 }
 
 type stat struct {
@@ -116,6 +173,7 @@ const (
 	statErr status = iota
 	statBlocked
 	statOk
+	statTimeout
 )
 
 func doCheck(url string, expect []byte, client *http.Client) *result {
@@ -160,9 +218,10 @@ func proxyGen(r io.Reader) chan *url.URL {
 
 		for i := 0; s.Scan(); i++ {
 			line := s.Text()
+
 			u, err := url.Parse(line)
 			if err != nil {
-				logger.Println("Error on line %d: '%s' is not URL", i, line)
+				logger.Printf("Error on line %d: '%s' is not URL", i, line)
 				continue
 			}
 
@@ -170,7 +229,7 @@ func proxyGen(r io.Reader) chan *url.URL {
 		}
 
 		if err := s.Err(); err != nil {
-			logger.Println("Error while scanning urls: %s", err)
+			logger.Printf("Error while scanning urls: %s", err)
 		}
 
 	}()
